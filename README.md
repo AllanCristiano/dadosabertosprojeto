@@ -3,7 +3,7 @@
 > **Pergunta de negócio:** *em quais UFs o preço do combustível está acima da média nacional — e como isso evoluiu mês a mês?*
 
 Pipeline de dados ponta a ponta sobre a **série histórica de preços de combustíveis da ANP** (dados abertos, cobertura nacional):
-**Airflow (ETL) → PostgreSQL (modelo dimensional) → API Spring Boot → painel Angular mobile-first → Power BI**.
+**Airflow (ETL) → PostgreSQL (modelo dimensional) → API Spring Boot → painel Angular mobile-first → Power BI**, mais um **módulo de alertas** com regras de negócio e **mensageria (RabbitMQ)**: o ETL anuncia *carga concluída* e a API avalia as regras de alerta cadastradas.
 
 ![demo](docs/painel-demo.gif)
 
@@ -19,7 +19,7 @@ Exemplo com os dados carregados (gasolina, junho/2026): **18 das 27 UFs** estava
 
 ## Executar
 
-Pré-requisito: Docker. Portas usadas: `4200`, `8080`, `8081`, `5433`.
+Pré-requisito: Docker. Portas usadas: `4200`, `8080`, `8081`, `5433`, `5672`, `15672`.
 
 ```bash
 docker compose up -d --build                                   # 1. sobe tudo
@@ -32,6 +32,7 @@ docker compose exec airflow-scheduler airflow dags trigger anp_combustiveis_etl 
 | Painel Angular | http://localhost:4200 | `demo` / `demo` |
 | API + Swagger | http://localhost:8081/swagger-ui.html | login em `POST /api/v1/auth/login` |
 | Airflow | http://localhost:8080 | `admin` / `admin` |
+| RabbitMQ (painel) | http://localhost:15672 | `guest` / `guest` |
 | PostgreSQL | `localhost:5433` (db `anp`, schema `dw`) | `anp` / `anp` |
 
 > A DAG nasce pausada (padrão do Airflow); também pode ser ativada pela interface. Credenciais acima são **apenas de demonstração**; em outro ambiente defina `JWT_SECRET`, `APP_USER` e `APP_PASSWORD`.
@@ -46,18 +47,37 @@ flowchart LR
   DW --> API[Spring Boot API<br/>JWT · paginação · Swagger]
   API --> NG[Angular<br/>painel mobile-first]
   DW --> PBI[Power BI]
+  AF -- "evento carga.concluida" --> MQ{{RabbitMQ}}
+  MQ --> API
+  API -- "alerta.disparado" --> MQ
 ```
 
 | Camada | Pasta | Tecnologia |
 |---|---|---|
 | ETL | `airflow/dags` | Python 3.12 + Airflow 2.10 |
 | Banco | `db/init` | PostgreSQL 16 (star schema, matview, view analítica) |
-| API | `api` | Java 21 + Spring Boot 3.4 — monolito modular: `auth`, `preco`, `analise`, `shared` |
+| API | `api` | Java 21 + Spring Boot 3.4 — monolito modular: `auth`, `preco`, `analise`, `alerta`, `shared` |
 | Painel | `web` | Angular 22 — monolito modular: `core`, `shared`, `layout`, `features/*` (rotas lazy) |
+| Fila | `docker-compose.yml` | RabbitMQ 3.13 (exchange topic, DLQ) |
 | Power BI | `powerbi` | Guia de conexão + medidas DAX |
 | CI | `.github/workflows` | GitHub Actions: testes e build da API, do painel e checagem da DAG |
 
+> 📋 Análise de requisitos, regras de negócio e rastreabilidade para testes: [`docs/REQUISITOS.md`](docs/REQUISITOS.md) · 📨 Mensageria (topologia, contratos, falhas): [`docs/MENSAGERIA.md`](docs/MENSAGERIA.md)
+
 > 📐 Documento completo de arquitetura (atores, casos de uso, processos, visões C4, dados, implantação, ADRs, segurança e riscos): [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md)
+
+## Alertas de preço (regras de negócio + fila)
+
+Cadastre "avise-me quando a **gasolina** no **RR** passar **5%** acima da média nacional". Ao fim de cada carga, a DAG publica `carga.concluida` no RabbitMQ; a API consome, avalia as regras ativas, grava **um alerta por regra/mês** (idempotente) e publica `alerta.disparado`. Severidade: `ATENCAO` (<1,5× o limite), `ALTA` (≥1,5×), `CRITICA` (≥2×). Falhas são reenviadas 3× e vão para a **DLQ**.
+
+```bash
+curl -X POST localhost:8081/api/v1/alertas/regras -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"produto":"gasolina","uf":"rr","limitePct":5}'
+curl -X POST localhost:8081/api/v1/alertas/avaliacoes -H "Authorization: Bearer $TOKEN"   # reavalia (assíncrono)
+curl localhost:8081/api/v1/alertas -H "Authorization: Bearer $TOKEN"
+```
+
+Com os dados carregados, esse exemplo gera um alerta `CRITICA` (RR +15,3%). Em bancos criados antes deste módulo, aplique `db/init/02_alertas.sql` (ver [`docs/MENSAGERIA.md`](docs/MENSAGERIA.md)).
 
 ## Modelo de dados
 
@@ -91,9 +111,13 @@ Entrada cinematográfica palavra a palavra, fundo em aurora animada, vidro fosco
 
 | Alvo | Comando | Resultado |
 |---|---|---|
-| API (contrato HTTP + segurança, sem banco) | `cd api && mvn verify` | 6 testes |
-| Painel | `cd web && npx ng test --watch=false` | 2 testes (exportação CSV) |
-| ETL | execução real da DAG | 1,2 mi linhas carregadas, idempotência confirmada |
+| API (regras de negócio, contrato HTTP, segurança, repositórios em H2, mensageria) | `cd api && mvn verify` | 74 testes · **100 % de linhas e de branches** (JaCoCo falha o build abaixo disso; relatório em `api/target/site/jacoco`) |
+| Painel (API client, auth, guard, login, animações, CSV) | `cd web && npx ng test --watch=false` | 23 testes |
+| ETL (helpers, download, alerta de falha, publicação do evento) | `pip install -r airflow/requirements-dev.txt && python -m pytest airflow/tests` | 24 testes |
+| ETL de ponta a ponta | execução real da DAG | 1,2 mi linhas carregadas, idempotência confirmada |
+| Fila de ponta a ponta | RabbitMQ + Postgres reais (manual) | regra → evento → consumidor → alerta CRÍTICO, sem duplicar ao reavaliar |
+
+> Sem Maven local? `docker run --rm -v "$PWD/api:/app" -w /app maven:3.9-eclipse-temurin-21 mvn verify`. Fora do escopo dos testes automatizados: as páginas `dashboard`/`explorer` do painel e um teste com broker real (Testcontainers) — ver riscos em [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md).
 
 O CI roda os mesmos passos a cada push/PR.
 

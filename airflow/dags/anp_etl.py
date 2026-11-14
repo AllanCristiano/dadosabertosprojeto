@@ -38,6 +38,9 @@ MAX_REJECT_RATIO = float(os.getenv("ANP_MAX_REJECT_RATIO", "0.05"))
 PRICE_MIN, PRICE_MAX = 0.5, 30.0
 REQUIRED = ["estado - sigla", "municipio", "cnpj da revenda", "produto", "data da coleta", "valor de venda"]
 CONN_ID = "anp_dw"
+RABBITMQ_MGMT_URL = os.getenv("RABBITMQ_MGMT_URL", "")   # vazio = não publica evento
+RABBITMQ_AUTH = (os.getenv("RABBITMQ_USER", "guest"), os.getenv("RABBITMQ_PASSWORD", "guest"))
+EVENT_EXCHANGE, EVENT_ROUTING_KEY = "anp.eventos", "carga.concluida"
 
 
 def notify_failure(context):
@@ -50,6 +53,29 @@ def notify_failure(context):
             requests.post(url, json={"text": msg, "content": msg}, timeout=10)
         except requests.RequestException:
             log.exception("Não foi possível enviar o alerta")
+
+
+def publicar_evento_carga() -> bool:
+    """Avisa a API (via RabbitMQ) que há dados novos; ela avalia as regras de alerta.
+
+    Best-effort: a carga já está válida, então falha de mensageria só gera aviso em log.
+    """
+    if not RABBITMQ_MGMT_URL:
+        log.info("RABBITMQ_MGMT_URL ausente; evento não publicado")
+        return False
+    try:
+        resp = requests.post(
+            f"{RABBITMQ_MGMT_URL}/api/exchanges/%2F/{EVENT_EXCHANGE}/publish",
+            json={"properties": {"content_type": "application/json"}, "routing_key": EVENT_ROUTING_KEY,
+                  "payload": "{}", "payload_encoding": "string"},
+            auth=RABBITMQ_AUTH, timeout=10)
+        resp.raise_for_status()
+        routed = resp.json().get("routed")
+        log.info("Evento %s publicado (roteado=%s)", EVENT_ROUTING_KEY, routed)
+        return bool(routed)
+    except requests.RequestException as exc:
+        log.warning("Não foi possível publicar o evento (a carga segue válida): %s", exc)
+        return False
 
 
 def _norm(s: str) -> str:
@@ -245,9 +271,13 @@ def anp_etl():
             raise ValueError(f"Qualidade: fato vazia ({total}) ou com órfãs ({orfas})")
         log.info("OK: %d linhas na fato", total)
 
+    @task
+    def publicar_carga_concluida():
+        publicar_evento_carga()
+
     arquivos = planejar()
     carregados = extrair_validar_carregar.expand(arquivo=arquivos)
-    transformar(carregados) >> atualizar_e_checar()
+    transformar(carregados) >> atualizar_e_checar() >> publicar_carga_concluida()
 
 
 anp_etl()

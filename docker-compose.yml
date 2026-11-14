@@ -7,6 +7,7 @@ x-airflow: &airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW_CONN_ANP_DW: postgresql://anp:anp@postgres:5432/anp
     ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    RABBITMQ_MGMT_URL: http://rabbitmq:15672
   volumes: ["./airflow/dags:/opt/airflow/dags"]
   depends_on: { postgres: { condition: service_healthy } }
 
@@ -36,6 +37,11 @@ services:
     ports: ["8080:8080"]
     depends_on: { airflow-init: { condition: service_completed_successfully } }
 
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports: ["5672:5672", "15672:15672"]     # painel: http://localhost:15672 (guest/guest)
+    healthcheck: { test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"], interval: 10s, retries: 20 }
+
   api:
     build: ./api
     environment:
@@ -45,8 +51,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-change-me-change-me-32b!}
       APP_USER: ${APP_USER:-demo}
       APP_PASSWORD: ${APP_PASSWORD:-demo}
+      RABBIT_HOST: rabbitmq
     ports: ["8081:8080"]            # Swagger: http://localhost:8081/swagger-ui.html
-    depends_on: { postgres: { condition: service_healthy } }
+    depends_on: { postgres: { condition: service_healthy }, rabbitmq: { condition: service_healthy } }
 
   web:
     build: ./web

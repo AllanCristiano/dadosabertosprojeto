@@ -51,7 +51,7 @@ public class SecurityConfig {
     CorsConfigurationSource corsConfigurationSource(@Value("${app.cors-origins}") List<String> origins) {
         var c = new CorsConfiguration();
         c.setAllowedOrigins(origins);
-        c.setAllowedMethods(List.of("GET", "POST", "OPTIONS"));
+        c.setAllowedMethods(List.of("GET", "POST", "DELETE", "OPTIONS"));
         c.setAllowedHeaders(List.of("*"));
         var src = new UrlBasedCorsConfigurationSource();
         src.registerCorsConfiguration("/**", c);

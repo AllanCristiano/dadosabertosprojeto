@@ -1,5 +1,6 @@
 package com.anp.fuel.shared;
 
+import com.anp.fuel.alerta.AlertaException;
 import jakarta.validation.ConstraintViolationException;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -14,4 +15,16 @@ public class ApiExceptionHandler {
     Map<String, String> invalid(ConstraintViolationException e) {
         return Map.of("error", e.getMessage());
     }
+
+    @ExceptionHandler(AlertaException.NaoEncontrada.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    Map<String, String> naoEncontrada(AlertaException e) { return Map.of("error", e.getMessage()); }
+
+    @ExceptionHandler(AlertaException.Duplicada.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    Map<String, String> duplicada(AlertaException e) { return Map.of("error", e.getMessage()); }
+
+    @ExceptionHandler(AlertaException.Invalida.class)
+    @ResponseStatus(HttpStatus.UNPROCESSABLE_ENTITY)
+    Map<String, String> invalida(AlertaException e) { return Map.of("error", e.getMessage()); }
 }

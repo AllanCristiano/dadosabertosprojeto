@@ -1,10 +1,19 @@
 spring:
+  rabbitmq:
+    host: ${RABBIT_HOST:localhost}
+    port: ${RABBIT_PORT:5672}
+    username: ${RABBIT_USER:guest}
+    password: ${RABBIT_PASSWORD:guest}
+    listener.simple:
+      default-requeue-rejected: false   # falha após retries vai para a DLQ, sem loop infinito
+      retry: { enabled: true, max-attempts: 3, initial-interval: 1s, multiplier: 2 }
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/anp}
     username: ${DB_USER:anp}
     password: ${DB_PASSWORD:anp}
   jackson.default-property-inclusion: non_null
 app:
+  mensageria.enabled: ${MENSAGERIA_ENABLED:true}
   jwt:
     secret: ${JWT_SECRET:change-me-change-me-change-me-32b!}
     ttl-minutes: 60

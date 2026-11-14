@@ -2,8 +2,9 @@
 
 | | |
 |---|---|
-| **Versão** | 1.0 |
-| **Escopo** | Pipeline analítico de preços de combustíveis (ANP): ETL, data warehouse, API, painel web e BI |
+| **Versão** | 1.1 — inclui módulo de alertas e mensageria |
+| **Escopo** | Pipeline analítico de preços de combustíveis (ANP): ETL, data warehouse, API, painel web, BI e alertas via fila |
+| **Documentos do módulo de alertas** | [Requisitos e regras de negócio](REQUISITOS.md) · [Mensageria](MENSAGERIA.md) |
 | **Estilo arquitetural** | Monolito modular por camada (um deploy por camada, módulos internos isolados) |
 | **Leia também** | [README](../README.md) · [Guia Power BI](../powerbi/README.md) |
 
@@ -68,6 +69,7 @@ flowchart LR
 | RF09 | Documentar a API via Swagger/OpenAPI | API |
 | RF10 | Painel com filtros, gráficos, tabela paginada e **exportação CSV** | Web |
 | RF11 | Relatório Power BI conectado ao mesmo banco | BI |
+| RF12–RF16 | **Alertas de preço**: regras configuráveis, avaliação automática via fila, severidade, DLQ — detalhes e regras de negócio em [`REQUISITOS.md`](REQUISITOS.md) | API / Fila |
 
 ### 3.2 Não funcionais
 | ID | Requisito | Como é atendido |
@@ -208,9 +210,12 @@ flowchart TB
     AFW[airflow-web]
     AFS[airflow-scheduler]
     PG[(postgres 16<br/>dbs: anp, airflow)]
+    MQ[[rabbitmq 3.13<br/>:5672 · mgmt :15672]]
   end
   WEB -->|/api proxy| API
   API -->|JDBC| PG
+  API <-->|AMQP: eventos e alertas| MQ
+  AFS -->|"evento carga.concluida"| MQ
   AFS -->|DAG: COPY/upserts| PG
   AFW --- PG
   AFS -->|HTTPS| ANP([ANP])
@@ -221,7 +226,8 @@ flowchart TB
 | `web` | Servir SPA e fazer proxy de `/api` | Angular 22, nginx |
 | `api` | Regras de acesso a dados, segurança, Swagger | Java 21, Spring Boot 3.4 |
 | `airflow-scheduler` / `-web` | Orquestrar e monitorar o ETL | Airflow 2.10 |
-| `postgres` | Staging, DW e metadados do Airflow | PostgreSQL 16 |
+| `postgres` | Staging, DW, metadados do Airflow e regras/alertas | PostgreSQL 16 |
+| `rabbitmq` | Eventos entre ETL e API; DLQ — ver [`MENSAGERIA.md`](MENSAGERIA.md) | RabbitMQ 3.13 |
 
 ### 6.3 Visão de componentes (módulos)
 
@@ -232,12 +238,17 @@ flowchart LR
     auth[auth<br/>AuthController · SecurityConfig]
     preco[preco<br/>Controller · Repository · Dto]
     analise[analise<br/>Controller · Repository · Dto]
+    alerta[alerta<br/>RegraService · AvaliadorAlertas<br/>AvaliacaoService · Mensageria]
     shared[shared<br/>PageResponse · ExceptionHandler]
   end
   preco --> shared
   analise --> shared
-  auth -. protege .-> preco & analise
+  alerta --> shared
+  alerta -->|lê ranking| analise
+  auth -. protege .-> preco & analise & alerta
 ```
+
+Dentro de `alerta`: **núcleo puro** (`AvaliadorAlertas`, `Severidade`, records) ← **serviços** (`RegraService`, `AvaliacaoService`) ← **portas** (`RegraRepository`, `AlertaRepository`, `Mensageria`) ← **adaptadores** (`Jdbc*Repository`, `RabbitMensageria`, consumidores, `AlertaController`).
 
 **Painel — monolito modular**
 ```mermaid
@@ -290,7 +301,25 @@ erDiagram
   ETL_CONTROLE { text arquivo PK
     int linhas_lidas
     int linhas_validas }
+  REGRA ||--o{ ALERTA_DISPARADO : regra_id
+  REGRA {
+    bigint id PK
+    text produto
+    char uf
+    numeric limite_pct
+    text status
+    timestamptz criada_em
+  }
+  ALERTA_DISPARADO {
+    bigint id PK
+    bigint regra_id FK
+    date mes_ref
+    numeric variacao_pct
+    text severidade
+  }
 ```
+
+Módulo de alertas (schema `alerta`): `REGRA` guarda a configuração; `ALERTA_DISPARADO` tem `UNIQUE (regra_id, mes_ref)` — garante um alerta por regra/mês mesmo com mensagens repetidas. Índice parcial único `(produto, uf) WHERE status='ATIVA'` impede regras ativas duplicadas.
 
 **Camadas:** `staging.stg_preco` (dado tipado, transitório) → `dw.*` (dimensões + fato) → `dw.mv_preco_mensal_uf` (agregado materializado) → `dw.vw_preco_vs_media_nacional` (média nacional ponderada, `variacao_pct`, `acima_da_media`).
 
@@ -305,6 +334,7 @@ flowchart LR
       afw[airflow-web :8080]
       afs[airflow-scheduler]
       pg[(postgres :5433→5432<br/>volume pgdata)]
+      mq[[rabbitmq :5672 · :15672]]
     end
   end
 ```
@@ -319,6 +349,11 @@ Um único `docker-compose.yml`. Persistência no volume `pgdata`. DAGs montadas 
 | GET | `/api/v1/analise/ranking` | UFs × média nacional (`produto`, `mes` opcional) |
 | GET | `/api/v1/analise/serie` | Série mensal de uma UF |
 | GET | `/api/v1/analise/produtos` · `/ufs` | Listas para filtros |
+| POST/GET | `/api/v1/alertas/regras` | Cria (201/409/422) e lista regras de alerta |
+| GET/DELETE | `/api/v1/alertas/regras/{id}` | Busca / remove (404 se não existe) |
+| POST | `/api/v1/alertas/regras/{id}/pausar` · `/ativar` | Altera status (idempotente) |
+| GET | `/api/v1/alertas?limite=` | Alertas disparados, mais recentes primeiro |
+| POST | `/api/v1/alertas/avaliacoes` | Enfileira avaliação (202), `mes` opcional |
 | GET | `/actuator/health` · `/swagger-ui.html` | Saúde e documentação (públicos) |
 
 Paginação padrão: `{content, page, size, totalElements, totalPages}`. Erros de validação → `400`; sem/expirado token → `401`.
@@ -339,6 +374,9 @@ Paginação padrão: `{content, page, size, totalElements, totalPages}`. Erros d
 | 8 | **Chart.js + CSS** para animação | `@angular/animations`, ECharts | Bundle menor, animações GPU-friendly | Menos abstrações prontas |
 | 9 | **nginx faz proxy de `/api`** | CORS direto | Mesma origem, sem exposição de CORS no front | Config adicional no nginx |
 | 10 | **Postgres único** com 2 bancos | Servidores separados | Simplicidade local | Em produção, separar metadados e DW |
+| 11 | **RabbitMQ** para o evento "carga concluída" | Chamada HTTP direta ETL→API; polling no banco | ETL não conhece a API; retry e DLQ nativos; reprocessável | Mais um componente para operar — ver [`MENSAGERIA.md`](MENSAGERIA.md) |
+| 12 | **Portas e núcleo puro** no módulo `alerta` (`Mensageria`, `RegraRepository`, `AvaliadorAlertas`) | Chamar Spring AMQP/JDBC direto no serviço | Regras de negócio testadas sem infraestrutura (100 % de cobertura) | Interfaces extras |
+| 13 | **Idempotência por restrição de banco** (`UNIQUE (regra_id, mes_ref)`, índice parcial de regra ativa) | Checar no código antes de gravar | Correto sob concorrência e com entrega *at-least-once* | Exceção de chave duplicada vira fluxo normal |
 
 ---
 
@@ -358,8 +396,8 @@ Paginação padrão: `{content, page, size, totalElements, totalPages}`. Erros d
 
 ## 9. Qualidade e operação
 
-- **Testes:** 6 de API (contrato HTTP, 401/400, paginação, ranking), 2 de painel (CSV); ETL validado com carga real (1.227.029 linhas) e reexecução idempotente.
-- **CI** (GitHub Actions): `mvn verify`, `ng test` + `ng build`, `ruff` + compilação da DAG, `docker compose config`.
+- **Testes:** 74 de API (regras de negócio, contrato HTTP, segurança/CORS, repositórios em H2, mensageria) com **100 % de linhas e de branches** exigidos pelo JaCoCo no build; 23 de painel (API client, auth/interceptor/guard, login, diretivas de animação, CSV); 24 de ETL (helpers e publicação do evento); ETL também validado com carga real (1.227.029 linhas) e reexecução idempotente.
+- **CI** (GitHub Actions): `mvn verify` (com *gate* de cobertura), `ng test` + `ng build`, `ruff` + `pytest` + compilação da DAG, `docker compose config`.
 - **Operação:** reprocessar = *trigger* da DAG com `{"force": true}`; falhas aparecem por task na UI do Airflow e no webhook.
 - **Métricas de referência (ambiente local):** carga de ~3 semestres em ~3 min; painel inicial ≈ 93 kB transferidos (gzip) e rotas lazy.
 
@@ -375,6 +413,8 @@ Paginação padrão: `{content, page, size, totalElements, totalPages}`. Erros d
 | Autenticação de usuário único | Não serve para produção | Integrar IdP (OIDC) |
 | Relatório Power BI | `.pbix` ainda não incluído | Seguir [guia](../powerbi/README.md) |
 | Sem monitoramento de métricas da API | Pouca visibilidade em produção | Expor Prometheus via Actuator |
+| Alertas só notificam em log; regras globais; produto não validado contra o catálogo | Ver [`REQUISITOS.md` §10](REQUISITOS.md) | Canal real de notificação, regra por usuário, validação de produto |
+| Painel Angular ainda sem tela de alertas; páginas `dashboard`/`explorer` sem teste de componente | Funcionalidade só via API/Swagger | Tela de regras e testes de componente |
 
 ---
 
