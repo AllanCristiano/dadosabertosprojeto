@@ -101,8 +101,6 @@ O CI roda os mesmos passos a cada push/PR.
 
 Conexão em `localhost:5433`, banco `anp`, view `dw.vw_preco_vs_media_nacional`. Passo a passo, medidas DAX e páginas sugeridas em [`powerbi/README.md`](powerbi/README.md).
 
-> 🚧 O arquivo `.pbix` e suas capturas ainda não foram adicionados: só podem ser gerados no Power BI Desktop.
-
 ## Desenvolvimento local
 
 ```bash
