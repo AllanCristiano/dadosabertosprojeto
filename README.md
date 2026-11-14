@@ -117,7 +117,7 @@ Entrada cinematográfica palavra a palavra, fundo em aurora animada, vidro fosco
 | ETL de ponta a ponta | execução real da DAG | 1,2 mi linhas carregadas, idempotência confirmada |
 | Fila de ponta a ponta | RabbitMQ + Postgres reais (manual) | regra → evento → consumidor → alerta CRÍTICO, sem duplicar ao reavaliar |
 
-> Sem Maven local? `docker run --rm -v "$PWD/api:/app" -w /app maven:3.9-eclipse-temurin-21 mvn verify`. Fora do escopo dos testes automatizados: as páginas `dashboard`/`explorer` do painel e um teste com broker real (Testcontainers) — ver riscos em [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md).
+> Sem Maven local? `docker run --rm -v "$PWD/api:/app" -w /app maven:3.9-eclipse-temurin-21 mvn verify`. (no Git Bash do Windows, prefixe com `MSYS_NO_PATHCONV=1`; o Surefire pode registrar um aviso "kill self fork JVM" sem afetar o resultado — o build termina em `BUILD SUCCESS`). Fora do escopo dos testes automatizados: as páginas `dashboard`/`explorer` do painel e um teste com broker real (Testcontainers) — ver riscos em [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md).
 
 O CI roda os mesmos passos a cada push/PR.
 
