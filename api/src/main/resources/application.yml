@@ -1,0 +1,16 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/anp}
+    username: ${DB_USER:anp}
+    password: ${DB_PASSWORD:anp}
+  jackson.default-property-inclusion: non_null
+app:
+  jwt:
+    secret: ${JWT_SECRET:change-me-change-me-change-me-32b!}
+    ttl-minutes: 60
+  auth:
+    username: ${APP_USER:demo}
+    password: ${APP_PASSWORD:demo}
+  cors-origins: ${CORS_ORIGINS:http://localhost:4200,http://localhost:8081}
+management.endpoints.web.exposure.include: health
+springdoc.swagger-ui.path: /swagger-ui.html

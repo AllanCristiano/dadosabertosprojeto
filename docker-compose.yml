@@ -1,0 +1,56 @@
+# docker compose up --build  ->  Postgres, Airflow, API e painel Angular
+x-airflow: &airflow
+  build: ./airflow
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://anp:anp@postgres:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW_CONN_ANP_DW: postgresql://anp:anp@postgres:5432/anp
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+  volumes: ["./airflow/dags:/opt/airflow/dags"]
+  depends_on: { postgres: { condition: service_healthy } }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: anp, POSTGRES_PASSWORD: anp, POSTGRES_DB: anp }
+    ports: ["5433:5432"]            # Power BI conecta aqui (db: anp, schema: dw)
+    volumes: ["pgdata:/var/lib/postgresql/data", "./db/init:/docker-entrypoint-initdb.d:ro"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U anp -d anp"], interval: 5s, retries: 20 }
+
+  airflow-init:
+    <<: *airflow
+    command: >
+      bash -c "airflow db migrate &&
+               airflow users create --username admin --password admin --firstname a --lastname a --role Admin --email a@a.com || true"
+    restart: "no"
+
+  airflow-scheduler:
+    <<: *airflow
+    command: scheduler
+    depends_on: { airflow-init: { condition: service_completed_successfully } }
+
+  airflow-web:
+    <<: *airflow
+    command: webserver
+    ports: ["8080:8080"]
+    depends_on: { airflow-init: { condition: service_completed_successfully } }
+
+  api:
+    build: ./api
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/anp
+      DB_USER: anp
+      DB_PASSWORD: anp
+      JWT_SECRET: ${JWT_SECRET:-change-me-change-me-change-me-32b!}
+      APP_USER: ${APP_USER:-demo}
+      APP_PASSWORD: ${APP_PASSWORD:-demo}
+    ports: ["8081:8080"]            # Swagger: http://localhost:8081/swagger-ui.html
+    depends_on: { postgres: { condition: service_healthy } }
+
+  web:
+    build: ./web
+    ports: ["4200:80"]
+    depends_on: [api]
+
+volumes: { pgdata: {} }
